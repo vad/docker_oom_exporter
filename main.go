@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	docker "github.com/docker/engine-api/client"
+	dt "github.com/docker/engine-api/types"
 	"github.com/hpcloud/tail"
 	"golang.org/x/net/context"
 	"io/ioutil"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const (
@@ -19,9 +21,11 @@ const (
 )
 
 var (
-	oomCounter = make(map[string]int)
-	input      = flag.String("input", "/var/log/kern.log", "Input file")
-	output     = flag.String("output", "/tmp/cacca.prom", "Output file")
+	oomCounter   = make(map[string]int)
+	input        = flag.String("input", "/var/log/kern.log", "Input file")
+	output       = flag.String("output", "/tmp/cacca.prom", "Output file")
+	dockerClient *docker.Client
+	reCName      = regexp.MustCompile("[a-zA-Z-]+-[0-9]+-([a-zA-Z-]+)-[a-f0-9]{20}")
 )
 
 func write() {
@@ -31,7 +35,7 @@ func write() {
 	tmpfile, err := ioutil.TempFile("", "prom_oom")
 
 	if err != nil {
-		panic("Cannot open temporary file")
+		log.Fatalln("Cannot open temporary file")
 	}
 
 	fmt.Fprintf(tmpfile, "# HELP %s %s\n", METRIC_NAME, METRIC_DESCRIPTION)
@@ -41,30 +45,77 @@ func write() {
 		fmt.Fprintf(tmpfile, "%s{container=\"%s\"} %d\n", METRIC_NAME, k, oomCounter[k])
 	}
 	if err = tmpfile.Close(); err != nil {
-		panic("Cannot close temporary file: " + err.Error())
+		log.Fatalln("Cannot close temporary file: " + err.Error())
 	}
 
 	// atomic mv tmp file to output dir
 	if err = os.Rename(tmpfile.Name(), *output); err != nil {
-		panic("Cannot write to output file: " + err.Error())
+		log.Fatalln("Cannot write to output file: " + err.Error())
 	}
+}
+
+func containerName(id string) string {
+	container, err := dockerClient.ContainerInspect(context.Background(), id)
+
+	if err != nil {
+		log.Printf("Error getting information about container %s (skipping): %e\n", id, err.Error())
+	} else {
+		name := container.Name
+		match := reCName.FindStringSubmatch(name)
+		if len(match) < 2 {
+			log.Println("Container name does not match pattern")
+		} else {
+			return match[1]
+		}
+	}
+	return ""
+}
+
+// prometheus doesn't like labels to appear out the blue, rate doesn't work. Here we periodically fetch containers
+// and set oomCounter accordingly
+func setZeros() {
+	for {
+		options := dt.ContainerListOptions{}
+		cs, err := dockerClient.ContainerList(context.Background(), options)
+		if err != nil {
+			log.Println("Can not connect to docker")
+		} else {
+			for _, c := range cs {
+				name := containerName(c.ID)
+				if name != "" {
+					if oomCounter[name] == 0 {
+						oomCounter[name] = 0
+					}
+				}
+			}
+		}
+
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func init() {
+	var err error
+
+	defaultHeaders := map[string]string{"User-Agent": "engine-api-cli-1.0"}
+	dockerClient, err = docker.NewClient("unix:///var/run/docker.sock", "v1.21", nil, defaultHeaders)
+
+	if err != nil {
+		log.Fatalln("Can't connect to docker socket")
+	}
+
 }
 
 func main() {
 	flag.Parse()
+
+	go setZeros()
 
 	t, err := tail.TailFile(*input, tail.Config{Follow: true})
 	if err != nil {
 		log.Fatalln("Log file does not exist")
 	}
 	re := regexp.MustCompile(".*cpuset=(.{12})")
-	reCName := regexp.MustCompile("[a-zA-Z-]+-[0-9]+-([a-zA-Z-]+)-[a-f0-9]{20}")
-
-	defaultHeaders := map[string]string{"User-Agent": "engine-api-cli-1.0"}
-	dc, err := docker.NewClient("unix:///var/run/docker.sock", "v1.21", nil, defaultHeaders)
-	if err != nil {
-		log.Fatalln("Can't connect to docker socket")
-	}
 
 	for line := range t.Lines {
 		if strings.Contains(line.Text, "invoked oom-killer") {
@@ -75,18 +126,9 @@ func main() {
 			// container ID
 			cid := re.FindStringSubmatch(l.Text)[1]
 
-			container, err := dc.ContainerInspect(context.Background(), cid)
+			name := containerName(cid)
 
-			if err != nil {
-				log.Printf("Error getting information about container %s (skipping): %e\n", cid, err.Error())
-			} else {
-				name := container.Name
-				match := reCName.FindStringSubmatch(name)
-				if len(match) < 2 {
-					log.Println("Container name does not match pattern")
-				} else {
-					name = match[1]
-				}
+			if name != "" {
 				oomCounter[name] += 1
 			}
 

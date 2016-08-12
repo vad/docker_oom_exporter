@@ -18,12 +18,14 @@ import (
 const (
 	METRIC_NAME        = "oom_totals"
 	METRIC_DESCRIPTION = "OOM counts per container"
+	VERSION            = "0.1.10"
 )
 
 var (
 	oomCounter   = make(map[string]int)
 	input        = flag.String("input", "/var/log/kern.log", "Input file")
 	output       = flag.String("output", "/tmp/cacca.prom", "Output file")
+	printVersion = flag.Bool("version", false, "Print version number and quit")
 	dockerClient *docker.Client
 	reCName      = regexp.MustCompile("[a-zA-Z-]+-[0-9]+-([a-zA-Z-]+)-[a-f0-9]{20}")
 )
@@ -109,6 +111,11 @@ func init() {
 
 func main() {
 	flag.Parse()
+
+	if *printVersion {
+		fmt.Println("Version: " + VERSION)
+		os.Exit(0)
+	}
 
 	go setZeros()
 

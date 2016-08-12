@@ -71,7 +71,7 @@ func containerName(id string) string {
 	return ""
 }
 
-// prometheus doesn't like labels to appear out the blue, rate doesn't work. Here we periodically fetch containers
+// prometheus doesn't like labels to appear out of the blue, rate() doesn't work. Here we periodically fetch containers
 // and set oomCounter accordingly
 func setZeros() {
 	for {
@@ -89,8 +89,9 @@ func setZeros() {
 				}
 			}
 		}
+		write()
 
-		time.Sleep(1 * time.Second)
+		time.Sleep(10 * time.Second)
 	}
 }
 
